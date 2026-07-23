@@ -5,13 +5,22 @@ from scipy.stats import poisson
 np.seterr(invalid="raise")
 
 class DixonColes:
-    def __init__(self, fit_options=None, data=None):
+    def __init__(self, fit_options=None, data=None, rho_init=None, rho_bound=None):
         self.data = None
         if fit_options is None:
             self.fit_options = {"disp": True, "maxiter": 1000}
         else:
             self.fit_options = fit_options
 
+        if rho_init == None:
+            self.rho_init = -0.05
+        else:
+            self.rho_init = rho_init
+
+        if rho_bound == None:
+            self.rho_bound = -0.5
+        else:
+            self.rho_bound = rho_bound
 
     def fit(self, data):
         # Fit the Dixon-Coles model to the provided data
@@ -19,7 +28,6 @@ class DixonColes:
         self.n_teams = len(self.teams_indices)
         raw_result = self.optimize_parameters(data)
         self.result = self.clean_raw_result(raw_result)
-
 
 
     def predict(self, home_team, away_team):
@@ -48,30 +56,14 @@ class DixonColes:
         initial_params[-1] = 0 
         constraint = {"type": "eq",
                       "fun": lambda params: np.sum(params[:self.n_teams])}
-        bounds = ([(-2, 2)] * self.n_teams +   # attack
-                  [(-2, 2)] * self.n_teams +   # defense
-                  [(-2, 2)] +        # home_advantage
-                  [(0, 0)]      # rho: we start with pure poisson, so rho=0 for the first stage
+        bounds = ([(-1.5, 1.5)] * self.n_teams +   # attack
+                  [(-1.5, 1.5)] * self.n_teams +   # defense
+                  [(0, 0.5)] +        # home_advantage
+                  [(self.rho_bound, 0)]      # rho: we start with pure poisson, so rho=0 for the first stage
                   )
         
-        poisson_result = minimize(self.log_likelihood, initial_params, args=(data), constraints=constraint, options=self.fit_options, bounds=bounds)
-        stage1_params = poisson_result.x  
-        stage2_init = stage1_params.copy()
-        stage2_init[-1] = -0.1
-
-        bounds = ([(-1.5, 1.5)] * self.n_teams +
-                  [(-1.5, 1.5)] * self.n_teams +
-                  [(0, 1)] +
-                  [(-0.3, 0)])
-
-        full_result = minimize(
-            self.log_likelihood,
-            stage2_init,
-            args=(data),
-            constraints=constraint,
-            bounds=bounds,
-            options=self.fit_options)
-        return full_result.x 
+        result = minimize(self.log_likelihood, initial_params, args=(data), constraints=constraint, options=self.fit_options, bounds=bounds)
+        return result.x 
 
 
     def save_model(self, file_path):
@@ -101,7 +93,7 @@ class DixonColes:
         m = (home_goals == 1) & (away_goals == 1)
         tau[m] = 1 - rho
 
-        return tau
+        return np.maximum(tau, 1e-10)
 
 
     def clean_raw_result(self, raw_result):
