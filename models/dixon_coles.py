@@ -2,7 +2,6 @@ from scipy.optimize import minimize
 import numpy as np
 import polars as pl
 from scipy.stats import poisson
-from scipy.optimize import check_grad, approx_fprime
 np.seterr(invalid="raise")
 
 class DixonColes:
@@ -13,12 +12,12 @@ class DixonColes:
         else:
             self.fit_options = fit_options
 
-        if rho_init is None:
+        if rho_init == None:
             self.rho_init = -0.05
         else:
             self.rho_init = rho_init
 
-        if rho_bound is None:
+        if rho_bound == None:
             self.rho_bound = -0.5
         else:
             self.rho_bound = rho_bound
