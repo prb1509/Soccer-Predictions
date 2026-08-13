@@ -1,7 +1,13 @@
+from typing import Literal
 import numpy as np
 from scipy.stats import norm
+from numpy.typing import NDArray
+from collections.abc import Sequence
 
-def block_bootstrap(data, block_size=None, n_bootstraps=1000):
+BlockSize = Literal["sqrt", "square_root", "n^(1/2)", "n**(1/2)", "default",
+                     "cubed", "cubic", "cubic_root", "cube_root", "n^(1/3)", "n**(1/3)"]
+
+def block_bootstrap(data: Sequence[float] | NDArray[np.float64], block_size: int | BlockSize | None = None, n_bootstraps: int = 1000) -> NDArray[np.float64]:
     """Moving block bootstrap for the mean of a time series.
 
     Resamples `data` by concatenating randomly-selected overlapping
@@ -10,9 +16,9 @@ def block_bootstrap(data, block_size=None, n_bootstraps=1000):
 
     Parameters
     ----------
-    data : array-like
+    data : Sequence[float] | NDArray[np.float64]
         The time series to bootstrap.
-    block_size : int, str, or None
+    block_size : int, BlockSize, or None
         Length of each block. If None, defaults to 10. Also accepts
         "sqrt"/"n^(1/2)"-style aliases for n**0.5, and "cubed"/"n^(1/3)"-
         style aliases for n**(1/3) (see source for the exact accepted
@@ -22,7 +28,7 @@ def block_bootstrap(data, block_size=None, n_bootstraps=1000):
 
     Returns
     -------
-    np.ndarray
+    NDArray[np.float64]
         Array of shape (n_bootstraps,) containing the mean of each
         bootstrap sample.
     """
@@ -33,6 +39,8 @@ def block_bootstrap(data, block_size=None, n_bootstraps=1000):
         block_size = int(n**0.5)
     elif block_size in ("cubed", "cubic", "cubic_root", "cube_root", "n^(1/3)", "n**(1/3)"):
         block_size = int(n**(1/3))
+    else: 
+        raise ValueError(f"Unrecognized block_size: {block_size!r}")
     n_blocks = n // block_size
     indices = np.arange(n - block_size + 1)
     bootstrapped_mean_samples = []
@@ -47,16 +55,30 @@ def block_bootstrap(data, block_size=None, n_bootstraps=1000):
     return np.array(bootstrapped_mean_samples)
 
 
-def autocovariance(x, lag):
-    """Calculate the autocovariance of a time series at a given lag."""
+def autocovariance(x: Sequence[float] | NDArray[np.float64], lag: int) -> float:
+    """Calculate the autocovariance of a time series at a given lag.
+    
+    Parameters
+    ----------
+    x : Sequence[float] | NDArray[np.float64]
+        The time series.
+    lag : int
+        The lag at which to calculate the autocovariance.
+
+    Returns
+    -------
+    float
+        The autocovariance at the specified lag.
+    """
     # Autocovariance at lag k is defined as:
     # \sum_{i=k+1}^{n} (x_i - \bar{x})(x_{i-k} - \bar{x}) / n
     n = len(x)
     x_bar = np.mean(x)
+    x = np.asarray(x)
     return np.sum((x[:-lag] - x_bar) * (x[lag:] - x_bar)) / n
 
 
-def diebold_mariano_test(loss_diff, h=1, alpha=0.05, verbose=False):
+def diebold_mariano_test(loss_diff: Sequence[float] | NDArray[np.float64], h: int = 1, alpha: float = 0.05, verbose: bool = False) -> tuple[float, float, bool]:
     """Diebold-Mariano test for equal predictive accuracy of two forecasts.
 
     Tests the null hypothesis that two forecasts have the same expected
@@ -64,7 +86,7 @@ def diebold_mariano_test(loss_diff, h=1, alpha=0.05, verbose=False):
 
     Parameters
     ----------
-    loss_diff : array-like
+    loss_diff : Sequence[float] | NDArray[np.float64]
         Loss differential series (loss_a - loss_b) between two
         competing forecasts, one value per matched observation.
     h : int
@@ -88,7 +110,7 @@ def diebold_mariano_test(loss_diff, h=1, alpha=0.05, verbose=False):
     n = len(loss_diff)
     mean_loss_diff = np.mean(loss_diff)
     gamma0 = np.var(loss_diff)
-    autocovariances_sum = 0
+    autocovariances_sum = 0.0
     lag_contributions = []
     for lag in range(1, h):
         gamma_k = autocovariance(loss_diff, lag)
