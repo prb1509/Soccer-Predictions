@@ -74,8 +74,3 @@ def log_loss(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int, eps
     probs = np.asarray(probs)
     p = np.clip(probs[outcome_idx], eps, 1 - eps)
     return float(-np.log(p))
-
-
-print(help(rps))
-print(help(brier))
-print(help(log_loss))
