@@ -39,7 +39,9 @@ def block_bootstrap(data: Sequence[float] | NDArray[np.float64], block_size: int
         block_size = int(n**0.5)
     elif block_size in ("cubed", "cubic", "cubic_root", "cube_root", "n^(1/3)", "n**(1/3)"):
         block_size = int(n**(1/3))
-    else: 
+    elif isinstance(block_size, int):
+        pass
+    else:
         raise ValueError(f"Unrecognized block_size: {block_size!r}")
     n_blocks = n // block_size
     indices = np.arange(n - block_size + 1)
