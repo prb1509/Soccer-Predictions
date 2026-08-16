@@ -3,6 +3,9 @@ from typing import Any
 import numpy as np
 import polars as pl
 from enum import IntEnum
+from exceptions import *
+import logging
+logger = logging.getLogger(__name__)
 
 class Outcome(IntEnum):
     HOME_WIN = 0
@@ -70,8 +73,8 @@ def _fit_model(model_factory: Callable[[], Any],
         model.fit(train_data, **fit_kwargs)
         return model
     except Exception as e:
-        print(f"Walk forward fit failed on window ending "
-              f"{train_data[date_col][-1]} ({train_data.height} rows): {e}")
+        logger.error("Walk forward fit failed on window ending %s (%d rows)", train_data[date_col][-1], train_data.height)
+        logger.exception(e, stack_info=True)
         return None
  
  
@@ -90,7 +93,11 @@ def _known_teams(model: Any) -> set[str] | None:
     """
     if hasattr(model, "result") and isinstance(model.result, dict):
         return set(model.result.keys()).difference({"gamma", "rho"})
-    return None
+    elif hasattr(model, "team_ratings") and isinstance(model.team_ratings, dict):
+        return set(model.team_ratings.keys())
+    else:
+        logger.warning("Model %s does not have a known team list. Unknown teams will not be detected.", type(model).__name__)
+        return None
  
  
 def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
@@ -128,12 +135,13 @@ def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
     for row in test_data.iter_rows(named=True):
         home, away = row[home_col], row[away_col]
         if teams_ok is not None and (home not in teams_ok or away not in teams_ok):
+            logger.warning("Unknown team(s) in row: %s vs %s on %s", home, away, row[date_col])
             unknown_teams += 1
         try:
             probs = np.asarray(predict_fn(model, row), dtype=float)
         except Exception as e:
-            print(f"Walk forward predict failed for {home} vs {away} "
-                  f"on {row[date_col]}: {e}")
+            logger.error("Walk forward predict failed for %s vs %s on %s", home, away, row[date_col])
+            logger.exception(e, stack_info=True)
             raise
         records.append({"date": row[date_col],
                         "home_team": home,
@@ -141,8 +149,10 @@ def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
                         "probs": probs.tolist(),
                         "outcome": outcome_fn(row)})
     if unknown_teams:
-        print(f"Walk forward: {unknown_teams} rows in this window had unknown team(s)")
-        print(f"Empirical priors used to fill in missing team strengths.")
+        logger.info("Walk forward: %d rows in this window had unknown team(s)", unknown_teams)
+        logger.info("Empirical priors used to fill in missing team strengths.")
+    logger.debug("Walk forward: scored %d rows in this window, %d unknown teams", test_data.height, unknown_teams)
+    logger.debug("Scores: %s", records[-test_data.height:])
 
 
 def _unpack_cols(col_names: dict[str, str] | None) -> tuple[str, str, str, str, str]:
@@ -181,7 +191,6 @@ def walk_forward_by_date(
         col_names: dict[str, str] | None = None,
         min_train_matches: int = 380,
         rolling_window: int | None = None,
-        verbose: bool = True,
         fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
     """Performs walk-forward validation on the given data. Each 
     walk-forward evaluation step size is determined by the matchday dates and 
@@ -233,10 +242,6 @@ def walk_forward_by_date(
         this is redundant (and can discard information a smoother
         approach would keep) for models that already apply their own
         time-decay weighting internally
-    verbose : bool = True
-        Print one progress line per refit: the cutoff/last
-        date trained through, cumulative matches trained on, 
-        and cumulative records scored so far.
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
 
@@ -246,6 +251,7 @@ def walk_forward_by_date(
         Dataframe containing the evaluation results 
         (match date, home/away teams, predicted/actual outcomes).
     """
+    logger.info("Running walk-forward validation by matchday date with min_train_matches=%d, rolling_window=%s", min_train_matches, rolling_window)
     date_col, home_col, away_col, home_goals_col, away_goals_col = _unpack_cols(col_names)
     data = data.sort(date_col)
     outcome_fn = (lambda row: default_outcome_idx(row, home_goals_col, away_goals_col))
@@ -254,6 +260,9 @@ def walk_forward_by_date(
     cutoffs = data[date_col].unique().sort().to_list()
     windows = [(d, data.filter(pl.col(date_col) == d)) for d in cutoffs]
     train_end = 0
+    if min_train_matches >= n:
+        logger.warning("Not enough matches to perform walk-forward validation. Data has %d matches, but min_train_matches=%d.", n, min_train_matches)
+        return pl.DataFrame(records)
     for cutoff, test_data in windows:
         if train_end < min_train_matches:
             train_end += test_data.height
@@ -265,9 +274,7 @@ def walk_forward_by_date(
             _score_window(model, test_data, predict_fn, outcome_fn, home_col,
                             away_col, date_col, records)
         train_end += test_data.height
-        if verbose:
-            print(f"[walk_forward] refit through {cutoff} -- "
-                    f"{train_end}/{n} matches trained on, {len(records)} scored so far")
+        logger.info("[walk_forward] refit through %s -- %d/%d matches trained on, %d scored so far", cutoff, train_end, n, len(records))
     return pl.DataFrame(records)
 
 
@@ -279,7 +286,6 @@ def walk_forward_by_refit_window(
         min_train_matches: int = 380,
         refit_every: int = 10,
         rolling_window: int | None = None,
-        verbose: bool = True,
         fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
     """Performs walk-forward validation by refitting the model at fixed intervals.
     Unlike the per matchday walk forward validation, this approach 
@@ -337,10 +343,6 @@ def walk_forward_by_refit_window(
         this is redundant (and can discard information a smoother
         approach would keep) for models that already apply their own
         time-decay weighting internally
-    verbose : bool = True
-        Print one progress line per refit: the cutoff/last
-        date trained through, cumulative matches trained on, 
-        and cumulative records scored so far.
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
 
@@ -350,12 +352,19 @@ def walk_forward_by_refit_window(
         Dataframe containing the evaluation results 
         (match date, home/away teams, predicted/actual outcomes).
     """
+    logger.info("Running walk-forward validation by refit window with min_train_matches=%d, refit_every=%d, rolling_window=%s", min_train_matches, refit_every, rolling_window)
+    if refit_every <= 0:
+        raise InvalidParameterError("refit_every must be positive.")
+    
     date_col, home_col, away_col, home_goals_col, away_goals_col = _unpack_cols(col_names)
     data = data.sort(date_col)
     outcome_fn = (lambda row: default_outcome_idx(row, home_goals_col, away_goals_col))
     n = data.height
     records = []
     train_end = min_train_matches
+    if min_train_matches >= n:
+        logger.warning("Not enough matches to perform walk-forward validation. Data has %d matches, but min_train_matches=%d.", n, min_train_matches)
+        return pl.DataFrame(records)
     while train_end < n:
         train_start = 0 if rolling_window is None else max(0, train_end - rolling_window)
         train_data = data.slice(train_start, train_end - train_start)
@@ -367,9 +376,7 @@ def walk_forward_by_refit_window(
             _score_window(model, test_data, predict_fn, outcome_fn, home_col,
                             away_col, date_col, records)
         train_end += refit_every
-        if verbose:
-            last_date = test_data[date_col][-1]
-            print(f"[walk_forward] refit through {last_date}  {min(train_end, n)}/{n} matches trained on, {len(records)} scored so far")
+        logger.info("[walk_forward] refit through %s -- %d/%d matches trained on, %d scored so far", test_data[date_col][-1], min(train_end, n), n, len(records))
 
     return pl.DataFrame(records)
 
@@ -383,7 +390,6 @@ def walk_forward(
         refit_every: int = 10,
         rolling_window: int | None = None,
         group_refits_by_date: bool = False,
-        verbose: bool = True,
         fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
     """Performs walk-forward validation on the given data. The walk-forward
     step can be determined by the match date or a fixed interval.
@@ -445,10 +451,6 @@ def walk_forward(
         If False, refit every refit_every matches regardless of date,
         which can split a single matchday's fixtures across
         two different fits. 
-    verbose : bool = True
-        Print one progress line per refit: the cutoff/last
-        date trained through, cumulative matches trained on, 
-        and cumulative records scored so far.
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
 
@@ -459,8 +461,8 @@ def walk_forward(
         (match date, home/away teams, predicted/actual outcomes).
     """
     if group_refits_by_date:
-        records = walk_forward_by_date(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, rolling_window=rolling_window, verbose=verbose, fit_kwargs=fit_kwargs)
+        records = walk_forward_by_date(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, rolling_window=rolling_window, fit_kwargs=fit_kwargs)
     else:
-        records = walk_forward_by_refit_window(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, refit_every=refit_every, rolling_window=rolling_window, verbose=verbose, fit_kwargs=fit_kwargs)
+        records = walk_forward_by_refit_window(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, refit_every=refit_every, rolling_window=rolling_window, fit_kwargs=fit_kwargs)
 
     return records

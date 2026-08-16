@@ -3,6 +3,9 @@ import numpy as np
 from scipy.stats import norm
 from numpy.typing import NDArray
 from collections.abc import Sequence
+from exceptions import InvalidParameterError, InvalidMatchDataError
+import logging
+logger = logging.getLogger(__name__)
 
 BlockSize = Literal["sqrt", "square_root", "n^(1/2)", "n**(1/2)", "default",
                      "cubed", "cubic", "cubic_root", "cube_root", "n^(1/3)", "n**(1/3)"]
@@ -32,7 +35,10 @@ def block_bootstrap(data: Sequence[float] | NDArray[np.float64], block_size: int
         Array of shape (n_bootstraps,) containing the mean of each
         bootstrap sample.
     """
+    logger.info("Running block bootstrap with block_size=%s, n_bootstraps=%d", block_size, n_bootstraps)
     n = len(data)
+    if n == 0:
+        raise InvalidMatchDataError("Data must not be empty.")
     if block_size is None:
         block_size = 10
     elif block_size in ("sqrt", "square_root", "n^(1/2)", "n**(1/2)", "default"):
@@ -43,6 +49,12 @@ def block_bootstrap(data: Sequence[float] | NDArray[np.float64], block_size: int
         pass
     else:
         raise ValueError(f"Unrecognized block_size: {block_size!r}")
+
+    if block_size <= 0:
+        raise InvalidParameterError("Block size must be positive.")
+    if block_size > n:
+        raise InvalidParameterError("Block size cannot exceed the length of the data.")
+    
     n_blocks = n // block_size
     indices = np.arange(n - block_size + 1)
     bootstrapped_mean_samples = []
@@ -74,6 +86,8 @@ def autocovariance(x: Sequence[float] | NDArray[np.float64], lag: int) -> float:
     """
     # Autocovariance at lag k is defined as:
     # \sum_{i=k+1}^{n} (x_i - \bar{x})(x_{i-k} - \bar{x}) / n
+    if lag <= 0:
+        raise InvalidParameterError("Lag must be positive.")
     n = len(x)
     x_bar = np.mean(x)
     x = np.asarray(x)
@@ -96,9 +110,6 @@ def diebold_mariano_test(loss_diff: Sequence[float] | NDArray[np.float64], h: in
         (1 to h-1) are included in the long-run variance estimate.
     alpha : float
         Significance level for the two-sided test.
-    verbose : bool
-        If True, print diagnostic output including per-lag
-        autocovariance contributions.
 
     Returns
     -------
@@ -109,7 +120,10 @@ def diebold_mariano_test(loss_diff: Sequence[float] | NDArray[np.float64], h: in
     significant : bool
         Whether the null hypothesis is rejected at level `alpha`.
     """
+    logger.info("Running Diebold-Mariano test with h=%d, alpha=%.2f", h, alpha)
     n = len(loss_diff)
+    if n == 0:
+        raise InvalidMatchDataError("Loss differential series must not be empty.")
     mean_loss_diff = np.mean(loss_diff)
     gamma0 = np.var(loss_diff)
     autocovariances_sum = 0.0
@@ -120,24 +134,26 @@ def diebold_mariano_test(loss_diff: Sequence[float] | NDArray[np.float64], h: in
         lag_contributions.append((lag, gamma_k, weighted))
         autocovariances_sum += gamma_k
 
+    if gamma0 + 2 * autocovariances_sum <= 0:
+        logger.warning("Variance of loss differential is non-positive; DM test is not applicable.")
+        logger.debug("Variance of loss differential:%f", gamma0 + 2 * autocovariances_sum)
     DM_estimate = mean_loss_diff / np.sqrt(gamma0 / n + 2 * autocovariances_sum / n)
     z_two_sided = norm.ppf(1 - alpha / 2)
     p_value = 2 * (1 - norm.cdf(abs(DM_estimate)))
     significant = abs(DM_estimate) > z_two_sided
     var_d_bar = gamma0 / n + 2 * autocovariances_sum / n
-
-    if verbose:
-        print(f"n (matches): {n}")
-        print(f"mean loss diff (a - b): {mean_loss_diff:.6f}")
-        print(f"gamma0 (lag-0 var): {gamma0:.6f}")
-        print(f"sum weighted autocovariance: {autocovariances_sum:.6f}")
-        print(f"var(d_bar): {var_d_bar:.6f}")
-        print(f"DM statistic: {DM_estimate:.4f}")
-        print(f"p-value: {p_value:.4f}")
-        print(f"critical z ({alpha=}): {z_two_sided:.4f}")
-        print(f"significant?: {significant}")
-        print("per-lag contributions (lag, gamma_k, weighted):")
-        for lag, gamma_k, weighted in lag_contributions:
-            print(f"lag {lag:2d}: gamma_k={gamma_k:+.6f}  weighted={weighted:+.6f}")
+    logger.info("Diebold-Mariano test results:")
+    logger.info("p-value: %.4f", p_value)
+    logger.info("significant?: %s", significant)
+    logger.info("DM statistic: %.4f", DM_estimate)
+    logger.debug("n (matches): %d", n)
+    logger.debug("mean loss diff (a - b): %.6f", mean_loss_diff)
+    logger.debug("gamma0 (lag-0 var): %.6f", gamma0)
+    logger.debug("sum weighted autocovariance: %.6f", autocovariances_sum)
+    logger.debug("var(d_bar): %.6f", var_d_bar)
+    logger.debug("critical z (alpha=%.2f): %.4f", alpha, z_two_sided)
+    logger.debug("per-lag contributions (lag, gamma_k, weighted):")
+    for lag, gamma_k, weighted in lag_contributions:
+        logger.debug("lag %2d: gamma_k=%+.6f  weighted=%+.6f", lag, gamma_k, weighted)
 
     return DM_estimate, p_value, significant
