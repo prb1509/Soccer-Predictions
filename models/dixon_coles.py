@@ -4,8 +4,10 @@ import numpy as np
 import polars as pl
 from scipy.stats import poisson
 from datetime import datetime, date
-np.seterr(invalid="raise")
-    
+from exceptions import OptimizationError, InvalidParameterError, ModelNotFittedError
+import logging
+logger = logging.getLogger(__name__)
+
 class DixonColes:
     def __init__(self, fit_options: dict | None = None, 
                  rho_init: float | None = None, 
@@ -33,6 +35,8 @@ class DixonColes:
 
         if rho_bound is None:
             self.rho_bound = -0.5
+        elif rho_bound >= 0:
+            raise InvalidParameterError("rho_bound must be negative.")
         else:
             self.rho_bound = rho_bound
 
@@ -61,6 +65,7 @@ class DixonColes:
             lose influence. xi=0 disables decay which is enabled
             by default.
         """
+        logger.info("Fitting Dixon-Coles model with xi=%f", xi)
         self._store_team_info(data)
         if reference_date is None:
             reference_date = max(data["match_date"])
@@ -68,10 +73,11 @@ class DixonColes:
         raw_result = self._optimize_parameters(data)
         self.team_ratings, self.gamma, self.rho = self._clean_raw_result(raw_result)
         self.result = self.team_ratings | {"gamma": self.gamma, "rho": self.rho}
+        logger.debug("Fitted model parameters: %s", self.result)
 
 
-    def predict(self, home_team: str, away_team: str, max_goals: int = 10, 
-                verbose: bool = False) -> tuple[float, float, float]:
+    def predict(self, home_team: str, away_team: str, 
+                max_goals: int = 10) -> tuple[float, float, float]:
         """Predict outcome probabilities for a single fixture.
         Combines the fitted attack/defense ratings for both teams
         with the home advantage and rho parameters to compute
@@ -91,8 +97,6 @@ class DixonColes:
         max_goals : int, optional
             Maximum number of goals to consider in the probability 
             calculation, by default 10
-        verbose : bool, optional
-            If True, print the predicted probabilities, by default False
 
         Returns
         -------
@@ -100,10 +104,23 @@ class DixonColes:
             Probabilities of a home win, draw, and away win,
             respectively; sum to 1.
         """
+        if max_goals <= 0:
+            logger.error("Invalid max_goals parameter: %d. Must be positive.", max_goals)
+            raise InvalidParameterError("max_goals must be positive.")
+        if not hasattr(self, "team_ratings"):
+            logger.error("Model has not been fitted yet. Call fit() before predict(). Model is missing team_ratings.")
+            raise ModelNotFittedError("Model must be fitted before making predictions.")
+        if not hasattr(self, "gamma"):
+            logger.error("Model has not been fitted yet. Call fit() before predict(). Model is missing gamma.")
+            raise ModelNotFittedError("Model must be fitted before making predictions.")
+        if not hasattr(self, "rho"):
+            logger.error("Model has not been fitted yet. Call fit() before predict(). Model is missing rho.")
+            raise ModelNotFittedError("Model must be fitted before making predictions.")
         average_attack, average_defense = self._trimmed_bottom_ratings(n_bottom=5, trim=2)
         if home_team not in self.team_ratings:
             attack_home = average_attack
             defense_home = average_defense
+            self.team_ratings[home_team] = {"attack": attack_home, "defense": defense_home}
         else:
             attack_home = self.team_ratings[home_team]["attack"]
             defense_home = self.team_ratings[home_team]["defense"]
@@ -111,6 +128,7 @@ class DixonColes:
         if away_team not in self.team_ratings:
             attack_away = average_attack
             defense_away = average_defense
+            self.team_ratings[away_team] = {"attack": attack_away, "defense": defense_away}
         else:
             attack_away = self.team_ratings[away_team]["attack"]
             defense_away = self.team_ratings[away_team]["defense"]
@@ -120,8 +138,7 @@ class DixonColes:
         lambda_away = np.exp(attack_away + defense_home)
         prob_home, prob_draw, prob_away = self._calculate_match_probabilities(lambda_home, lambda_away, self.rho, max_goals=max_goals)
 
-        if verbose:
-            print(prob_home, prob_draw, prob_away)
+        logger.info("Predicted probabilities: %s, %s, %s", prob_home, prob_draw, prob_away)
 
         return prob_home, prob_draw, prob_away
 
@@ -491,8 +508,10 @@ class DixonColes:
         attack_home, attack_away, defense_home, defense_away = self._map_team_params_to_matches(attack, defense, self.home_teams, self.away_teams, self.teams_indices)
         lambda_home = np.exp(attack_home + defense_away + gamma)
         lambda_away = np.exp(attack_away + defense_home)
-        log_tau = np.log(self._tau(data["home_goals"], data["away_goals"], lambda_home, lambda_away, rho))
-        log_likelihood_per_match = log_tau + poisson.logpmf(data["home_goals"], lambda_home) + poisson.logpmf(data["away_goals"], lambda_away)
+        home_goals = data["home_goals"].to_numpy()
+        away_goals = data["away_goals"].to_numpy()
+        log_tau = np.log(self._tau(home_goals, away_goals, lambda_home, lambda_away, rho))
+        log_likelihood_per_match = log_tau + poisson.logpmf(home_goals, lambda_home) + poisson.logpmf(away_goals, lambda_away)
         return -np.sum(self.delta_time_weights * log_likelihood_per_match)
 
 
@@ -537,7 +556,8 @@ class DixonColes:
         return -gradient
 
 
-    def _optimize_parameters(self, data: pl.DataFrame) -> np.ndarray:
+    def _optimize_parameters(self, data: pl.DataFrame, 
+                             require_convergence: bool = True) -> np.ndarray:
         """Fit model parameters via constrained maximum-likelihood optimization.
         Initializes attack/defense ratings from a small random
         normal distribution, gamma at 0.1, and rho at
@@ -550,6 +570,8 @@ class DixonColes:
         ----------
         data : pl.DataFrame
             Match data used to evaluate the log-likelihood and its gradient.
+        require_convergence : bool, optional
+            If True, raise an OptimizationError if the optimizer fails to converge.
 
         Returns
         -------
@@ -558,6 +580,7 @@ class DixonColes:
             (attack, defense, gamma,rho).
             Returned by scipy.optimize.minimize.
         """
+        logger.info("Starting optimization of Dixon-Coles model parameters.")
         initial_params = np.random.rand(2 * self.n_teams + 2)  # attack, defense, home_advantage, rho
         initial_params[:self.n_teams] = np.random.normal(0, 0.1, self.n_teams)
         initial_params[self.n_teams:2 * self.n_teams] = np.random.normal(0, 0.1, self.n_teams)
@@ -572,6 +595,10 @@ class DixonColes:
         
         result = minimize(self._log_likelihood, initial_params, args=(data), constraints=constraint,
                            options=self.fit_options, bounds=bounds, jac=self._log_likelihood_gradient)
+        if not result.success:
+            logger.warning("Optimization failed to converge: %s", result.message)
+            if require_convergence:
+                raise OptimizationError("Failed to converge.")
         return result.x 
 
 
@@ -704,13 +731,16 @@ class DixonColes:
         tuple[float, float]
             The average attack and defense ratings of the weakest teams
         """
+        if n_bottom <= trim:
+            raise InvalidParameterError("n_bottom must be greater than trim.")
+        
         teams = {k: v for k, v in self.team_ratings.items()}
 
         weakest_attack = np.array([v["attack"] for _, v in sorted(teams.items(), key=lambda kv: kv[1]["attack"])[:n_bottom]])
         weakest_defense = np.array([v["defense"] for _, v in sorted(teams.items(), key=lambda kv: kv[1]["defense"], reverse=True)[:n_bottom]])
 
-        avg_attack = weakest_attack[trim:].mean()
-        avg_defense = weakest_defense[trim:].mean()
+        avg_attack = float(weakest_attack[trim:].mean())
+        avg_defense = float(weakest_defense[trim:].mean())
 
         return avg_attack, avg_defense
 
@@ -872,4 +902,7 @@ class DixonColes:
             Normalized probabilities.
         """
         total = sum(probs)
+        logger.info("Normalizing factor=%f", total)
+        if total < 0.99:
+            logger.warning("Normalizing factor is low: %f", total)
         return tuple(p / total for p in probs)
