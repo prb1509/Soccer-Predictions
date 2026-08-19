@@ -96,7 +96,7 @@ def _known_teams(model: Any) -> set[str] | None:
     elif hasattr(model, "team_ratings") and isinstance(model.team_ratings, dict):
         return set(model.team_ratings.keys())
     else:
-        # logger.warning("Model %s does not have a known team list. Unknown teams will not be detected.", type(model).__name__)
+        logger.warning("Model %s does not have a known team list. Unknown teams will not be detected.", type(model).__name__)
         return None
  
  
