@@ -96,14 +96,15 @@ def _known_teams(model: Any) -> set[str] | None:
     elif hasattr(model, "team_ratings") and isinstance(model.team_ratings, dict):
         return set(model.team_ratings.keys())
     else:
-        logger.warning("Model %s does not have a known team list. Unknown teams will not be detected.", type(model).__name__)
+        # logger.warning("Model %s does not have a known team list. Unknown teams will not be detected.", type(model).__name__)
         return None
  
  
 def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
                   outcome_fn: Callable[[dict[str, Any]], Outcome],
                   home_col: str, away_col: str, date_col: str, 
-                  records: list[dict[str, Any]]) -> None:
+                  records: list[dict[str, Any]], extra_cols: list[str],
+                  model_info_fn: Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None = None) -> None:
     """Scores a single evaluation window.
 
     Parameters
@@ -129,6 +130,8 @@ def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
         Name of the column containing the match dates.
     records : list[dict[str, Any]]
         List to which the evaluation results will be appended.
+    model_info_fn : Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None
+        Function to extract model parameters information to store in records.
     """
     teams_ok = _known_teams(model)
     unknown_teams = 0
@@ -143,11 +146,15 @@ def _score_window(model: Any, test_data: pl.DataFrame, predict_fn: Callable,
             logger.error("Walk forward predict failed for %s vs %s on %s", home, away, row[date_col])
             logger.exception(e, stack_info=True)
             raise
-        records.append({"date": row[date_col],
+        base_record_data = {"match_date": row[date_col],
                         "home_team": home,
                         "away_team": away,
                         "probs": probs.tolist(),
-                        "outcome": outcome_fn(row)})
+                        "outcome": outcome_fn(row)} | {col: row[col] for col in extra_cols}
+        if model_info_fn is not None:
+            base_record_data.update(model_info_fn(model, home, away, row))
+        records.append(base_record_data)
+
     if unknown_teams:
         logger.info("Walk forward: %d rows in this window had unknown team(s)", unknown_teams)
         logger.info("Empirical priors used to fill in missing team strengths.")
@@ -188,10 +195,13 @@ def walk_forward_by_date(
         data: pl.DataFrame,
         model_factory: Callable[[], Any],
         predict_fn: Callable,
+        extra_cols: list[str],
         col_names: dict[str, str] | None = None,
         min_train_matches: int = 380,
         rolling_window: int | None = None,
-        fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
+        fit_kwargs: dict[str, Any] | None = None, 
+        model_info_fn: Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None = None
+) -> pl.DataFrame:
     """Performs walk-forward validation on the given data. Each 
     walk-forward evaluation step size is determined by the matchday dates and 
     matches played in the matchday.
@@ -236,15 +246,16 @@ def walk_forward_by_date(
         rolling_window is set) from this starting point.
     rolling_window : int | None = None
         Number of most-recent matches to train on at each refit. If
-        None, training uses an expanding window — every past match is
-        kept. If set, training uses a fixed-size sliding window — matches
+        None, training uses an expanding window: every past match is
+        kept. If set, training uses a fixed-size sliding window: matches
         older than rolling_window are dropped as new ones arrive. Note
         this is redundant (and can discard information a smoother
         approach would keep) for models that already apply their own
         time-decay weighting internally
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
-
+    model_info_fn : Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None
+        Function to extract model parameters information to store in records.
     Returns
     -------
     pl.DataFrame
@@ -272,7 +283,7 @@ def walk_forward_by_date(
         model = _fit_model(model_factory, train_data, date_col, fit_kwargs)
         if model is not None:
             _score_window(model, test_data, predict_fn, outcome_fn, home_col,
-                            away_col, date_col, records)
+                            away_col, date_col, records, extra_cols, model_info_fn)
         train_end += test_data.height
         logger.info("[walk_forward] refit through %s -- %d/%d matches trained on, %d scored so far", cutoff, train_end, n, len(records))
     return pl.DataFrame(records)
@@ -282,11 +293,13 @@ def walk_forward_by_refit_window(
         data: pl.DataFrame, 
         model_factory: Callable[[], Any],
         predict_fn: Callable,
+        extra_cols: list[str],
         col_names: dict[str, str] | None = None,
         min_train_matches: int = 380,
         refit_every: int = 10,
         rolling_window: int | None = None,
-        fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
+        fit_kwargs: dict[str, Any] | None = None,
+        model_info_fn: Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None = None) -> pl.DataFrame:
     """Performs walk-forward validation by refitting the model at fixed intervals.
     Unlike the per matchday walk forward validation, this approach 
     can fit matches of the same matchday in different walk forward steps if the 
@@ -337,14 +350,16 @@ def walk_forward_by_refit_window(
         final window may contain fewer matches.
     rolling_window : int | None = None
         Number of most-recent matches to train on at each refit. If
-        None, training uses an expanding window — every past match is
-        kept. If set, training uses a fixed-size sliding window — matches
+        None, training uses an expanding window: every past match is
+        kept. If set, training uses a fixed-size sliding window: matches
         older than rolling_window are dropped as new ones arrive. Note
         this is redundant (and can discard information a smoother
         approach would keep) for models that already apply their own
         time-decay weighting internally
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
+    model_info_fn : Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None
+        Function to extract model parameters information to store in records.
 
     Returns
     -------
@@ -374,7 +389,7 @@ def walk_forward_by_refit_window(
         model = _fit_model(model_factory, train_data, date_col, fit_kwargs)
         if model is not None:
             _score_window(model, test_data, predict_fn, outcome_fn, home_col,
-                            away_col, date_col, records)
+                            away_col, date_col, records, extra_cols, model_info_fn)
         train_end += refit_every
         logger.info("[walk_forward] refit through %s -- %d/%d matches trained on, %d scored so far", test_data[date_col][-1], min(train_end, n), n, len(records))
 
@@ -385,12 +400,14 @@ def walk_forward(
         data: pl.DataFrame, 
         model_factory: Callable[[], Any],
         predict_fn: Callable,
+        extra_cols: list[str],
         col_names: dict[str, str] | None = None,
         min_train_matches: int = 380,
         refit_every: int = 10,
         rolling_window: int | None = None,
         group_refits_by_date: bool = False,
-        fit_kwargs: dict[str, Any] | None = None) -> pl.DataFrame:
+        fit_kwargs: dict[str, Any] | None = None,
+        model_info_fn: Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None = None) -> pl.DataFrame:
     """Performs walk-forward validation on the given data. The walk-forward
     step can be determined by the match date or a fixed interval.
     
@@ -439,8 +456,8 @@ def walk_forward(
         final window may contain fewer matches.
     rolling_window : int | None = None
         Number of most-recent matches to train on at each refit. If
-        None, training uses an expanding window — every past match is
-        kept. If set, training uses a fixed-size sliding window — matches
+        None, training uses an expanding window: every past match is
+        kept. If set, training uses a fixed-size sliding window: matches
         older than rolling_window are dropped as new ones arrive. Note
         this is redundant (and can discard information a smoother
         approach would keep) for models that already apply their own
@@ -453,6 +470,8 @@ def walk_forward(
         two different fits. 
     fit_kwargs : dict[str, Any] | None = None
         Extra keyword arguments forwarded as-is to the model's fit method.
+    model_info_fn : Callable[[Any, str, str, dict[str, Any]], dict[str, Any]] | None
+        Function to extract model parameters information to store in records.
 
     Returns
     -------
@@ -461,8 +480,8 @@ def walk_forward(
         (match date, home/away teams, predicted/actual outcomes).
     """
     if group_refits_by_date:
-        records = walk_forward_by_date(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, rolling_window=rolling_window, fit_kwargs=fit_kwargs)
+        records = walk_forward_by_date(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, rolling_window=rolling_window, fit_kwargs=fit_kwargs, extra_cols=extra_cols, model_info_fn=model_info_fn)
     else:
-        records = walk_forward_by_refit_window(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, refit_every=refit_every, rolling_window=rolling_window, fit_kwargs=fit_kwargs)
+        records = walk_forward_by_refit_window(data=data, model_factory=model_factory, predict_fn=predict_fn, col_names=col_names, min_train_matches=min_train_matches, refit_every=refit_every, rolling_window=rolling_window, fit_kwargs=fit_kwargs, extra_cols=extra_cols, model_info_fn=model_info_fn)
 
     return records

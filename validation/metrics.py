@@ -1,16 +1,31 @@
 import numpy as np
-from numpy.typing import NDArray
-from collections.abc import Sequence
 import logging
 logger = logging.getLogger(__name__)
 
-def rps(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> float:
+def flatten_probs(probs: np.ndarray) -> np.ndarray:
+    """
+
+    Parameters
+    ----------
+    probs : np.ndarray
+        _description_
+
+    Returns
+    -------
+    np.ndarray
+        _description_
+    """
+    arr = np.asarray(probs, dtype=float)
+    return arr.reshape(-1)
+
+
+def rps(probs: np.ndarray, outcome_idx: int) -> float:
     """Ranked Probability Score, ordinal order: [home, draw, away].
     0 = perfect, 1 = worst.
 
     Parameters
     ----------
-    probs : Sequence[float] | NDArray[np.float64]
+    probs : np.ndarray
         Array of predicted probabilities for each outcome.
     outcome_idx : int
         Index of the actual outcome.
@@ -22,7 +37,7 @@ def rps(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> float
     """
     # Definition of RPS:
     # \sum_{i=1}^{r-1}\sum_{j=1}^{i}(p_j - o_j)^2 / (r-1)
-    probs = np.asarray(probs)
+    probs = flatten_probs(np.asarray(probs))
     logger.debug("Sum of probabilities: %f", sum(probs))
     cum_probs = np.cumsum(probs)
     actual = np.zeros(len(probs))
@@ -32,12 +47,12 @@ def rps(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> float
     return float(np.sum((cum_probs - cum_actual)**2) / (len(probs) - 1))
 
 
-def brier(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> float:
+def brier(probs: np.ndarray, outcome_idx: int) -> float:
     """Multi-class Brier score. 0 = perfect, 2 = worst.
     
     Parameters
     ----------
-    probs : Sequence[float] | NDArray[np.float64]
+    probs : np.ndarray
         Array of predicted probabilities for each outcome.
     outcome_idx : int
         Index of the actual outcome.
@@ -49,7 +64,7 @@ def brier(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> flo
     """
     # Definition of Brier score:
     # \sum_{i=1}^{r}(p_i - o_i)^2
-    probs = np.asarray(probs)
+    probs = flatten_probs(np.asarray(probs))
     logger.debug("Sum of probabilities: %f", sum(probs))
     actual = np.zeros(len(probs))
     actual[outcome_idx] = 1
@@ -57,13 +72,13 @@ def brier(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int) -> flo
     return float(np.sum((probs - actual)**2))
 
 
-def log_loss(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int, eps: float = 1e-15) -> float:
+def log_loss(probs: np.ndarray, outcome_idx: int, eps: float = 1e-15) -> float:
     """Log loss (cross-entropy) for the single actual outcome.
     0 = perfect, unbounded above without the clipping.
     
     Parameters
     ----------
-    probs : Sequence[float] | NDArray[np.float64]
+    probs : np.ndarray
         Array of predicted probabilities for each outcome.
     outcome_idx : int
         Index of the actual outcome.
@@ -77,7 +92,7 @@ def log_loss(probs: Sequence[float] | NDArray[np.float64], outcome_idx: int, eps
     # Definition of log loss:
     # -log(p_i), where p_i is the predicted probability assigned to
     # the actual outcome i 
-    probs = np.asarray(probs)
+    probs = flatten_probs(np.asarray(probs))
     logger.debug("Sum of probabilities: %f", sum(probs))
     p = np.clip(probs[outcome_idx], eps, 1 - eps)
     logger.debug("Log loss: probs=%s, outcome_idx=%d, p=%f", probs, outcome_idx, p)
