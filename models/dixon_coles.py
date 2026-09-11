@@ -1,4 +1,3 @@
-from typing import TypedDict
 from scipy.optimize import minimize
 import numpy as np
 import polars as pl
@@ -77,7 +76,7 @@ class DixonColes:
 
 
     def predict(self, home_team: str, away_team: str, 
-                max_goals: int = 10) -> tuple[float, float, float]:
+                max_goals: int = 15) -> tuple[float, float, float]:
         """Predict outcome probabilities for a single fixture.
         Combines the fitted attack/defense ratings for both teams
         with the home advantage and rho parameters to compute
@@ -96,7 +95,7 @@ class DixonColes:
             Name of the away team
         max_goals : int, optional
             Maximum number of goals to consider in the probability 
-            calculation, by default 10
+            calculation, by default 15
 
         Returns
         -------
@@ -747,7 +746,7 @@ class DixonColes:
 
     def _calculate_match_probabilities(self, lambda_home: float,
                                       lambda_away: float, rho: float,
-                                      max_goals: int = 10) -> tuple[float, float, float]:
+                                      max_goals: int = 15) -> tuple[float, float, float]:
         """Compute win/draw/loss probabilities from Dixon-Coles expected goals.
 
         Sums the Dixon-Coles joint probability over
@@ -765,7 +764,7 @@ class DixonColes:
         rho : float
             Correlation parameter.
         max_goals : int, optional
-            Maximum number of goals to consider, by default 10
+            Maximum number of goals to consider, by default 15
 
         Returns
         -------
